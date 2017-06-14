@@ -1,3 +1,4 @@
+%
 (Examples from M700V/M70V Series Programming Manual 13.5)
 (#100 = 1 means a test succeeded)
 
@@ -95,3 +96,4 @@
 #100 = FUP[-14 / 3]   EQ -5
 
 M30
+%

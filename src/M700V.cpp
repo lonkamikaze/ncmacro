@@ -170,7 +170,7 @@ template <> Token Lexer::get<TType::COMMENT>() {
 	Guard guard{this->in};
 	fetch(this->in, "^[\t\r ]*"_r);
 	auto start = this->in.tellg();
-	auto str = fetch(this->in, "^\\([^)]*\\)"_r);
+	auto str = fetch(this->in, "^(\\([^)]*\\)|%)"_r);
 	if (str == "") {
 		return {};
 	}
