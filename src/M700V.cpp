@@ -15,11 +15,17 @@
 
 #include "IL.hpp"
 
-using namespace ncmacro;
-using namespace ncmacro::il;
 using namespace ncmacro::m700v;
 
 namespace {
+
+using ncmacro::addr_t;
+using ncmacro::word_t;
+using ncmacro::value_t;
+using ncmacro::string_t;
+
+using ncmacro::il::OpCode;
+using ncmacro::il::Unit;
 
 constexpr size_t const MAXLINE{65536};
 
