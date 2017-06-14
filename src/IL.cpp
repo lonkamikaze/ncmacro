@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <sstream>
 #include <cstdio>
+#include <climits>
 
 using namespace ncmacro;
 using namespace ncmacro::il;
@@ -124,7 +125,7 @@ constexpr addr_t wordcount(OpCode const op) {
 template <typename T, size_t Size>
 constexpr size_t countof(T const (&)[Size]) { return Size; }
 
-char const * const opfmts[]{
+constexpr char const * const opfmts[]{
 	"%6d  NOP\n",
 	"%6d  LOAD    %f\n",
 	"%6d  LOAD    0\n",
@@ -714,17 +715,21 @@ void ncmacro::il::append(Unit & unit, string_t && str) {
 	append(unit, addr);
 }
 
+namespace ncmacro { /* g++5 complains without the namespaces */
+namespace il {
 template <>
-void ncmacro::il::append<char const *>(Unit & unit, char const * const str) {
+void append<char const *>(Unit & unit, char const * const str) {
 	append(unit, string_t{str});
 }
 
 template <typename T>
-void ncmacro::il::append(Unit & unit, T const data) {
+void append(Unit & unit, T const data) {
 	for (size_t i = 0; i < sizeof(data); ++i) {
 		unit.code.push_back(reinterpret_cast<char const *>(&data)[i]);
 	}
 }
+} /* namespace ncmacro */
+} /* namespace il */
 
 void ncmacro::il::update(Unit & unit, addr_t const dst, addr_t const val) {
 	for (size_t i = 0; i < sizeof(val); ++i) {
