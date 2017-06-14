@@ -9,11 +9,17 @@
 #include <cstdio>
 #include <climits>
 
-using namespace ncmacro;
 using namespace ncmacro::il;
-using namespace std::string_literals;
 
 namespace {
+
+using ncmacro::addr_t;
+using ncmacro::word_t;
+using ncmacro::value_t;
+using ncmacro::string_t;
+using ncmacro::Word;
+using ncmacro::Callback;
+using ncmacro::Block;
 
 struct Value {
 	bool initialised{false};
