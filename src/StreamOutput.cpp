@@ -2,6 +2,11 @@
 
 using namespace ncmacro::stream;
 
+using ncmacro::Block;
+using ncmacro::addr_t;
+using ncmacro::value_t;
+using ncmacro::string_t;
+
 void Output::block(Block const & words) {
 	for (auto const & word : words) {
 		this->out << word.name.str << word.value;
