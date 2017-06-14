@@ -391,7 +391,9 @@ void run(Unit const & unit, Callback & callback, Memory & global) {
 			pc = get<addr_t>(argp);
 			continue;
 		case OpCode::LRET:
-			pc = global.stack.size() ? pop(global.stack) : 0;
+			pc = global.stack.size()
+			     ? addr_t{pop(global.stack)}
+			     : addr_t{0};
 			break;
 		case OpCode::GOTO:
 			pc = get<addr_t>(argp);
