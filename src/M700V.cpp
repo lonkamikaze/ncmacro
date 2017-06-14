@@ -974,10 +974,10 @@ void finalise(AddrMeta & meta, Unit & unit) {
 		append(unit, OpCode::POP, addr_t{1}, OpCode::EXIT);
 	});
 
-	/* Return to caller */
+	/* Return to caller. */
 	append(unit, OpCode::BFLUSH, OpCode::LRET);
 
-	/* Update unresolved calls */
+	/* Update unresolved calls. */
 	for (auto const & call : meta.calls) {
 		for (auto const & pgm : meta.pgms) {
 			if (pgm.name == call.name) {
@@ -993,7 +993,8 @@ void finalise(AddrMeta & meta, Unit & unit) {
 void ncmacro::m700v::parse(Unit & unit, FileNames const & files) {
 	AddrMeta meta;
 	for (auto const & file : files) {
-		std::ifstream in{file};
+		/* Open in binary mode so MS Windows does not mangle files. */
+		std::ifstream in{file, std::ifstream::binary};
 		Lexer lexer{in};
 		Node_ptr root;
 		addr_t pgmstart = unit.code.size();
