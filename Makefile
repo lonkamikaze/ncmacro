@@ -1,4 +1,4 @@
-CXXFLAGS+=	-std=c++14
+CXXFLAGS+=	-std=c++14 -Wall -Werror
 
 all: src/demo src/asm
 
