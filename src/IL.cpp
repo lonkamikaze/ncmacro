@@ -392,7 +392,7 @@ void run(Unit const & unit, Callback & callback, Memory & global) {
 			continue;
 		case OpCode::LRET:
 			pc = global.stack.size()
-			     ? addr_t{pop(global.stack)}
+			     ? static_cast<addr_t>(pop(global.stack))
 			     : addr_t{0};
 			break;
 		case OpCode::GOTO:
