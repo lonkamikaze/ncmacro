@@ -379,15 +379,19 @@ void run(Unit const & unit, Callback & callback, Memory & global) {
 			local.push(Ram{});
 			continue;
 		case OpCode::RET:
-			local.pop();
-			pc = pop(global.stack);
+			if (global.stack.size()) {
+				local.pop();
+				pc = pop(global.stack);
+			} else {
+				pc = 0;
+			}
 			break;
 		case OpCode::LCALL:
 			push(global.stack, pc);
 			pc = get<addr_t>(argp);
 			continue;
 		case OpCode::LRET:
-			pc = pop(global.stack);
+			pc = global.stack.size() ? pop(global.stack) : 0;
 			break;
 		case OpCode::GOTO:
 			pc = get<addr_t>(argp);
