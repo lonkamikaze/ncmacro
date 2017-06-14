@@ -831,7 +831,7 @@ struct words : public Node {
 				append(unit, OpCode::LOAD0);
 			}
 			{
-				word_t name{0};
+				word_t name{""};
 				for (size_t i = 0; i < this->token.str.size(); ++i) {
 					name.str[i] = this->token.str[i];
 				}
