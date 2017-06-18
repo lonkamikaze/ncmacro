@@ -1,6 +1,5 @@
 #include "IL.hpp"
 
-#include <unordered_map>
 #include <stack>
 #include <cmath>
 #include <cassert>
@@ -706,25 +705,15 @@ template void ncmacro::il::append<value_t>(Unit &, value_t const);
 template void ncmacro::il::append<word_t>(Unit &, word_t const);
 
 void ncmacro::il::append(Unit & unit, string_t const & str) {
-	addr_t addr;
-	for (addr = 0; addr < unit.strings.size(); ++addr) {
-		if (str == unit.strings[addr]) {
-			return append(unit, addr);
-		}
+	auto const it = unit.strmap.find(str);
+	if (it == std::end(unit.strmap)) {
+		addr_t const pos = unit.strings.size();
+		unit.strings.push_back(str);
+		unit.strmap[str] = pos;
+		append(unit, pos);
+	} else {
+		append(unit, it->second);
 	}
-	unit.strings.push_back(str);
-	append(unit, addr);
-}
-
-void ncmacro::il::append(Unit & unit, string_t && str) {
-	addr_t addr;
-	for (addr = 0; addr < unit.strings.size(); ++addr) {
-		if (str == unit.strings[addr]) {
-			return append(unit, addr);
-		}
-	}
-	unit.strings.push_back(std::move(str));
-	append(unit, addr);
 }
 
 namespace ncmacro { /* g++5 complains without the namespaces */

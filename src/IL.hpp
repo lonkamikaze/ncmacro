@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <ostream>
 #include <functional>
+#include <unordered_map>
 
 namespace ncmacro {
 namespace il {
@@ -170,6 +171,7 @@ enum class OpCode : uint8_t {
 	VERSION  /**< The number of op codes, used for versioning. */
 };
 
+using StrMap = std::unordered_map<string_t, addr_t>;
 using Strings = std::vector<string_t>;
 using Code = std::vector<char>;
 
@@ -177,13 +179,13 @@ using Code = std::vector<char>;
  * A translation unit containing strings and code.
  */
 struct Unit {
+	StrMap strmap;
 	Strings strings;
 	Code code;
 };
 
 template <typename T> void append(Unit &, T const);
 void append(Unit &, string_t const &);
-void append(Unit &, string_t &&);
 
 /**
  * The append family of functions adds code to the translation
