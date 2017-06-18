@@ -685,7 +685,7 @@ void run(Unit const & unit, Callback & callback, Memory & global) {
 			break;
 		case OpCode::WARN:
 			callback.warn(unit.strings[get<addr_t>(argp)]);
-			return;
+			break;
 		case OpCode::ERROR:
 			callback.error(unit.strings[get<addr_t>(argp)]);
 			return;
