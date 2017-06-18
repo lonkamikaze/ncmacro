@@ -9,7 +9,6 @@
 #include "Callback.hpp"
 
 #include <cstdint>
-#include <string>
 #include <ostream>
 #include <functional>
 
