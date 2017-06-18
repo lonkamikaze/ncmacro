@@ -1,263 +1,357 @@
 #include "M700V.hpp"
 
-#include <cassert>
-#include <functional>
-#include <istream>
-#include <fstream>
-#include <iomanip>
-#include <cstdint>
-#include <memory>
-#include <unordered_map>
-#include <vector>
-#include <stack>
-#include <regex>
-#include <sstream>
-
 #include "IL.hpp"
+
+#include <fstream>
+#include <unordered_map>
+#include <sstream>
+#include <type_traits>
+#include <memory>
+
+#include <cassert>
 
 using namespace ncmacro::m700v;
 
 namespace {
 
-using ncmacro::addr_t;
-using ncmacro::word_t;
-using ncmacro::value_t;
-using ncmacro::string_t;
+using namespace std::string_literals;
 
-using ncmacro::il::OpCode;
+using ncmacro::Block;
+
+using ncmacro::string_t;
+using ncmacro::addr_t;
+using ncmacro::value_t;
+using ncmacro::word_t;
+
 using ncmacro::il::Unit;
+using ncmacro::il::OpCode;
+
+using ncmacro::il::append;
+using ncmacro::il::update;
+using ncmacro::il::ifelse;
+
+struct PgmCall {
+	addr_t nameid; /**< Name of the program to call. */
+	addr_t addr;   /**< The address to point to the program. */
+};
+
+struct WhileAddr {
+	addr_t id;
+	addr_t loop;
+	addr_t end;
+};
+
+struct Meta {
+	std::unordered_map<string_t, addr_t> parsed;
+	FileNames wanted;
+	std::vector<PgmCall> calls;
+	std::vector<WhileAddr> whiledo;
+};
 
 constexpr size_t const MAXLINE{65536};
 
-class Guard {
-	private:
-	std::istream & in;
-	std::streampos pos;
-	std::ios_base::iostate state;
+template <typename T, typename ET = typename std::underlying_type<T>::type>
+constexpr ET to_value(T const val) {
+	return static_cast<ET>(val);
+}
 
-	public:
-	Guard(std::istream & in) :
-	    in{in}, pos{in.tellg()}, state{in.rdstate()} {}
-
-	~Guard() {
-		this->in.clear();
-		this->in.setstate(this->state);
-		this->in.seekg(this->pos);
+template <size_t Size>
+constexpr bool is_in(char const needle, char const (&hay)[Size]) {
+	for (auto const ch : hay) {
+		if (needle == ch) { return ch > 0; }
 	}
+	return false;
+}
 
-	void commit() {
-		this->state = this->in.rdstate();
-		this->pos = this->in.tellg();
+constexpr bool is_num(char const ch) {
+	return ch >= '0' && ch <= '9';
+}
+
+/**
+ * Return number of matching characters if the complete reference string
+ * matches the start of str.
+ */
+constexpr size_t match_start(char const * str, char const * const ref) {
+	size_t i = 0;
+	for (; str[i] && ref[i]; ++i) {
+		if (str[i] != ref[i]) {
+			return 0;
+		}
 	}
+	if (ref[i] != 0) {
+		return 0;
+	}
+	return i;
+}
 
-	std::streampos getPos() const {
-		return this->pos;
+/**
+ * Return number of matching characters one of the reference stings
+ * matches the start of str.
+ */
+template <size_t ArrSize>
+constexpr size_t match_start(char const * const str,
+                             char const * const (&refs)[ArrSize]) {
+	for (size_t i = 0; i < ArrSize && refs[i]; ++i) {
+		auto cnt = match_start(str, refs[i]);
+		if (cnt) {
+			return cnt;
+		}
+	}
+	return 0;
+}
+
+template <typename... StrTs>
+constexpr size_t match_start(char const * const str, StrTs const... refs) {
+	for (auto const ref : {refs...}) {
+		auto cnt = match_start(str, ref);
+		if (cnt) {
+			return cnt;
+		}
+	}
+	return 0;
+}
+
+addr_t extract_addr(char const * & it, size_t const size) {
+	auto const end = it + size;
+	addr_t result = 0;
+	for (; it != end; ++it) {
+		result = result * 10 + (*it - '0');
+	}
+	return result;
+}
+
+/**
+ * Returns true if all parsers succeed.
+ */
+template <class...>
+struct Seq {
+	template <typename... ArgTs>
+	constexpr Seq(ArgTs const &...) {}
+
+	constexpr bool operator ()(char const *) const {
+		return true;
 	}
 };
 
-inline std::regex operator ""_r(char const * const literal, size_t const) {
-	return std::regex{literal};
-}
+template <class Head, class... Tail>
+struct Seq<Head, Tail...> {
+	Head head;
+	Seq<Tail...> tail;
 
-std::string fetch(std::istream & in, std::regex const & expr) {
-	char buf[MAXLINE]{0};
-	{
-		Guard guard{in};
-		in.get(buf, sizeof(buf), '\n');
-	}
-	std::cmatch m;
-	if (!std::regex_search(buf, m, expr)) {
-		return "";
-	}
-	in.seekg(m[0].length(), std::ios_base::cur);
-	return m[0].str();
-}
+	template <typename... ArgTs>
+	constexpr Seq(ArgTs &... args) : head{args...}, tail{args...} {}
 
-enum class TType {
-	NIL, ENDFILE, ENDLINE, COMMENT, KEYWORD, BRACKET_SQU_OPEN,
-	BRACKET_SQU_CLOSE, OP_MUL, OP_ADD, OP_UNARY, OP_COMP, OP_ASSIGN,
-	UINT, VAL, STRING, C_VAR, C_ASSIGN, C_LABEL, WORD
-};
-
-struct Token {
-	TType type{TType::NIL};
-	std::streampos start;
-	std::streampos end;
-	std::string str;
-
-	operator bool() const {
-		return this->type != TType::NIL;
+	bool operator ()(char const * & it) {
+		return head(it) && tail(it);
 	}
 };
 
 /**
- * Takes an istream and turns it into tokens.
+ * Returns true on the first parser to succeed.
  */
-struct Lexer {
-	std::istream & in;
+template <class...>
+struct Any {
+	template <typename... ArgTs>
+	constexpr Any(ArgTs const &...) {}
 
-	/**
-	 * Skips white space and comments.
-	 */
-	void skipws() {
-		while (fetch(this->in, "^[\t\r ]*"_r) != "" ||
-		       fetch(this->in, "^\\([^)]*\\)"_r) != "");
-	}
-
-	/**
-	 * Fetch token by regex.
-	 */
-	template <TType Type>
-	Token get(std::regex const & expr) {
-		if (this->in.eof()) {
-			return {};
-		}
-		Guard guard{this->in};
-		skipws();
-		auto start = this->in.tellg();
-		auto str = fetch(this->in, expr);
-		if (str == "") {
-			return {};
-		}
-		guard.commit();
-		auto end = guard.getPos();
-		return {Type, start, end, str};
-	}
-
-	Lexer(std::istream & in) : in{in} {}
-
-	template <TType Head, TType... Tail>
-	Token get() {
-		Token token = get<Head>();
-		if (token.type != TType::NIL) {
-			return token;
-		}
-		return get<Tail...>();
+	constexpr bool operator ()(char const *) const {
+		return false;
 	}
 };
 
-template <> Token Lexer::get<TType::ENDFILE>() {
-	Guard guard{this->in};
-	skipws();
-	this->in.get();
-	if (!this->in.eof()) {
-		return {};
+template <class Head, class... Tail>
+struct Any<Head, Tail...> {
+	Head head;
+	Any<Tail...> tail;
+
+	template <typename... ArgTs>
+	constexpr Any(ArgTs &... args) : head{args...}, tail{args...} {}
+
+	bool operator ()(char const * & it) {
+		return head(it) || tail(it);
 	}
-	guard.commit();
-	auto pos = guard.getPos();
-	return {TType::ENDFILE, pos, pos, ""};
-}
-
-template <> Token Lexer::get<TType::ENDLINE>() {
-	if (this->in.eof()) {
-		return {};
-	}
-	Guard guard{this->in};
-	skipws();
-	auto start = this->in.tellg();
-	while (this->in.get() != '\n') {
-		return {};
-	}
-	guard.commit();
-	auto end = guard.getPos();
-	return {TType::ENDLINE, start, end, "\n"};
-}
-
-template <> Token Lexer::get<TType::COMMENT>() {
-	if (this->in.eof()) {
-		return {};
-	}
-	Guard guard{this->in};
-	fetch(this->in, "^[\t\r ]*"_r);
-	auto start = this->in.tellg();
-	auto str = fetch(this->in, "^(\\([^)]*\\)|%)"_r);
-	if (str == "") {
-		return {};
-	}
-	guard.commit();
-	auto end = guard.getPos();
-	return {TType::COMMENT, start, end, str};
-}
-
-template <> Token Lexer::get<TType::KEYWORD>() {
-	return get<TType::KEYWORD>("^[A-Z]+"_r);
-}
-
-template <> Token Lexer::get<TType::BRACKET_SQU_OPEN>() {
-	return get<TType::BRACKET_SQU_OPEN>("^\\["_r);
-}
-
-template <> Token Lexer::get<TType::BRACKET_SQU_CLOSE>() {
-	return get<TType::BRACKET_SQU_CLOSE>("^\\]"_r);
-}
-
-template <> Token Lexer::get<TType::OP_MUL>() {
-	return get<TType::OP_MUL>("^([*/]|MOD|AND)"_r);
-}
-
-template <> Token Lexer::get<TType::OP_ADD>() {
-	return get<TType::OP_ADD>("^([-+]|OR|XOR)"_r);
-}
-
-template <> Token Lexer::get<TType::OP_COMP>() {
-	return get<TType::OP_COMP>("^(EQ|NE|GT|LT|GE|LE)"_r);
-}
-
-template <> Token Lexer::get<TType::OP_ASSIGN>() {
-	return get<TType::OP_ASSIGN>("^="_r);
-}
-
-template <> Token Lexer::get<TType::OP_UNARY>() {
-	return get<TType::OP_UNARY>("^[-+]"_r);
-}
-
-template <> Token Lexer::get<TType::UINT>() {
-	return get<TType::UINT>("^[0-9]+"_r);
-}
-
-template <> Token Lexer::get<TType::VAL>() {
-	return get<TType::VAL>("^([0-9]+\\.?[0-9]*|\\.[0-9]+)"_r);
-}
-
-template <> Token Lexer::get<TType::STRING>() {
-	return get<TType::STRING>("^<[^>]*>"_r);
-}
-
-template <> Token Lexer::get<TType::C_VAR>() {
-	return get<TType::C_VAR>("^#"_r);
-}
-
-template <> Token Lexer::get<TType::C_ASSIGN>() {
-	return get<TType::C_ASSIGN>("^="_r);
-}
-
-template <> Token Lexer::get<TType::C_LABEL>() {
-	return get<TType::C_LABEL>("^N"_r);
-}
-
-template <> Token Lexer::get<TType::WORD>() {
-	return get<TType::WORD>("^,?[A-Z]"_r);
-}
-
-struct Pgm {
-	string_t name;
-	addr_t addr;
 };
-
-using Pgms = std::vector<Pgm>;
 
 /**
- * Compile time meta.
+ * Return true even when sequence fails.
  */
-struct AddrMeta {
-	Pgms pgms;  /**< Contains program names and addresses. */
-	Pgms calls; /**< Programm names and addresses of calls. */
+template <class... Ts>
+struct Opt : Seq<Ts...> {
+	using Seq<Ts...>::Seq;
+	bool operator ()(char const * & it) {
+		Seq<Ts...>::operator ()(it);
+		return true;
+	}
 };
 
-struct {
-	char const * const c_str;
-	OpCode op;
-} const opmap[]{
+/**
+ * Parse sequence until failure, always returns true.
+ */
+template <class... Ts>
+struct All : Seq<Ts...> {
+	using Seq<Ts...>::Seq;
+	bool operator ()(char const * & it) {
+		while (Seq<Ts...>::operator ()(it));
+		return true;
+	}
+};
+
+/**
+ * Parse sequence until failure, returns true if at least one
+ * sequence succeeded.
+ */
+template <class... Ts>
+struct AllOnce : Seq<Ts...> {
+	using Seq<Ts...>::Seq;
+	bool operator ()(char const * & it) {
+		if (!Seq<Ts...>::operator ()(it)) { return false; };
+		while (Seq<Ts...>::operator ()(it));
+		return true;
+	}
+};
+
+struct Parse {
+	Meta & meta;
+	Unit & unit;
+	string_t const & file;
+	Parse(Meta & meta, Unit & unit, string_t const & file) :
+	    meta{meta}, unit{unit}, file{file} {}
+};
+
+struct WhiteSpace : Parse {
+	using Parse::Parse;
+	bool operator ()(char const * & it) {
+		for (; is_in(*it, " \t\r\n"); ++it);
+		return true;
+	}
+};
+
+struct Comment : WhiteSpace {
+	using WhiteSpace::WhiteSpace;
+	bool operator ()(char const * & it) {
+		WhiteSpace::operator ()(it);
+		switch (*it) {
+		case '%':
+			append(unit, OpCode::PRINT, string_t{it++, 1});
+			return true;
+		case '(':
+			break;
+		default:
+			return false;
+		}
+
+		size_t count = 1;
+		for (; it[count] && it[count] != ')'; ++count);
+		if (it[count] == ')') {
+			append(unit, OpCode::PRINT, string_t{it, count + 1});
+			it += count + 1;
+			return true;
+		}
+		return false;
+	}
+};
+
+struct Label : Parse {
+	All<Comment> comment;
+	template <class... ArgTs> Label(ArgTs &... args) :
+		Parse{args...}, comment{args...} {};
+
+	bool operator ()(char const * & it) {
+		comment(it);
+		if (*it != 'N') { return false; }
+
+		++it;
+		size_t count = 0;
+		for (; is_num(it[count]); ++count);
+		append(unit, OpCode::LBL, extract_addr(it, count));
+		return true;
+	}
+};
+
+struct Literal : Parse {
+	All<Comment> comment;
+	template <class... ArgTs> Literal(ArgTs &... args) :
+		Parse{args...}, comment{args...} {};
+
+	bool operator ()(char const * & it) {
+		comment(it);
+		if (*it != '.' && (*it < '0' || *it > '9')) {
+			return false;
+		}
+		value_t value{0};
+		for (; *it >= '0' && *it <= '9'; ++it) {
+			value = value * 10 + (*it - '0');
+		}
+		if (*it != '.') {
+			append(unit, OpCode::LOAD, value);
+			return true;
+		}
+		++it;
+		value_t num{0};
+		value_t denom{1};
+		for (; *it >= '0' && *it <= '9'; ++it) {
+			num = num * 10 + (*it - '0');
+			denom = denom * 10;
+		}
+		value += num / denom;
+		append(unit, OpCode::LOAD, value);
+		return true;
+	}
+};
+
+struct Var : Parse {
+	All<Comment> comment;
+	template <class... ArgTs> Var(ArgTs &... args) :
+		Parse{args...}, comment{args...} {};
+
+	bool operator ()(char const * & it,
+	                 std::function<void(addr_t const)> const & local,
+	                 std::function<void(addr_t const)> const & global) {
+		comment(it);
+		if (*it != '#') {
+			return false;
+		}
+		auto ptr = it;
+		comment(++ptr);
+		size_t count = 0;
+		for (; is_num(ptr[count]); ++count);
+		if (!count) {
+			return false;
+		}
+		auto const addr = extract_addr(ptr, count);
+		it = ptr;
+		if (addr < 34) {
+			local(addr);
+		} else {
+			global(addr);
+		}
+		return true;
+	}
+};
+
+struct LoadVar : Var {
+	using Var::Var;
+	std::function<void(addr_t const)> const local =
+	    [&](addr_t const addr) { append(unit, OpCode::LLOAD, addr); };
+	std::function<void(addr_t const)> const global =
+	    [&](addr_t const addr) { append(unit, OpCode::GLOAD, addr); };
+	bool operator ()(char const * & it) {
+		return Var::operator ()(it, local, global);
+	}
+};
+
+struct AssignVar : Var {
+	using Var::Var;
+	std::function<void(addr_t const)> const local =
+	    [&](addr_t const addr) { append(unit, OpCode::LSTORE, addr); };
+	std::function<void(addr_t const)> const global =
+	    [&](addr_t const addr) { append(unit, OpCode::GSTORE, addr); };
+	bool operator ()(char const * & it) {
+		return Var::operator ()(it, local, global);
+	}
+};
+
+std::unordered_map<string_t, OpCode> const opmap{
 	{"*",     OpCode::MUL},
 	{"/",     OpCode::DIV},
 	{"MOD",   OpCode::MOD},
@@ -291,162 +385,140 @@ struct {
 	{"EXP",   OpCode::EXP},
 };
 
-struct Node {
-	Lexer & lexer;
-	Guard guard{lexer.in};
-
-	bool constructed{false};
-
-	Node(Lexer & lexer) : lexer{lexer} {}
-
-	void construct(bool success) {
-		this->constructed = success;
-		if (success) {
-			this->guard.commit();
-		}
-	}
-
-	virtual TType type() const { return TType::NIL; }
-
-	/**
-	 * Traverse syntax tree and emit code.
-	 */
-	virtual void emit(AddrMeta &, Unit &) const = 0;
+struct Expr_base {
+	virtual bool operator ()(char const * &) = 0;
 };
 
-using Node_ptr = std::unique_ptr<Node>;
-
-template <class NodeT, typename... ArgTs>
-inline bool make(Node_ptr & dst, ArgTs &... args) {
-	NodeT node{args...};
-	if (!node.constructed) {
-		return false;
-	}
-	dst = Node_ptr{new NodeT{std::move(node)}};
-	return true;
-}
-
-template <class...>
-struct any {
-	template <typename... ArgTs>
-	any(Node_ptr &, ArgTs &...) {}
-
-	operator bool() const {
-		return false;
-	}
-};
-
-template <class NodeT, class... Tail>
-struct any<NodeT, Tail...> {
-	Node_ptr & dst;
+struct Braced : Parse {
+	All<Comment> comment;
+	Expr_base & expr;
 
 	template <typename... ArgTs>
-	any(Node_ptr & dst, ArgTs &... args) : dst{dst} {
-		if (!make<NodeT>(dst, args...)) {
-			any<Tail...>(dst, args...);
-		}
-	}
+	Braced(Expr_base & expr, ArgTs &... args) :
+	    Parse{args...}, comment{args...}, expr{expr} {}
 
-	operator bool() const {
-		return this->dst != nullptr;
+	bool operator ()(char const * & it) {
+		comment(it);
+		if (*it != '[') {
+			return false;
+		}
+		auto ptr = it + 1;
+		expr(ptr);
+		comment(ptr);
+		if (*ptr != ']') {
+			return false;
+		}
+		it = ptr + 1;
+		return true;
 	}
 };
 
-/*
- * macro syntax tree nodes
- */
+struct Function : Parse {
+	All<Comment> comment;
+	Braced braced;
 
-struct m_literal : public Node {
-	Token token;
-	value_t value;
+	template <typename... ArgTs>
+	Function(Expr_base & expr, ArgTs &... args) :
+	    Parse{args...}, comment{args...}, braced{expr, args...} {}
 
-	m_literal(Lexer & lexer) : Node{lexer},
-	    token{lexer.get<TType::VAL>()} {
-		if (this->token) {
-			std::istringstream{this->token.str} >> this->value;
+	bool operator ()(char const * & it) {
+		comment(it);
+		size_t cnt = 0;
+		for (; it[cnt] >= 'A' && it[cnt] <= 'Z'; ++cnt);
+
+		string_t match{it, cnt};
+		auto opcode = opmap.find(match);
+
+		if (opcode == std::end(opmap)) {
+			return false;
 		}
-		construct(this->token);
-	}
 
-	virtual void emit(AddrMeta &, Unit & unit) const override {
-		append(unit, OpCode::LOAD, this->value);
+		auto ptr = it + cnt;
+		comment(ptr);
+		if (!braced(ptr)) {
+			return false;
+		}
+		it = ptr;
+
+		switch (opcode->second) {
+		case OpCode::SIN:
+		case OpCode::COS:
+		case OpCode::TAN:
+			append(unit, OpCode::FROMDEG);
+			break;
+		case OpCode::SQRT:
+		case OpCode::LN:
+			append(unit, OpCode::CLONE, addr_t{1});
+			append(unit, OpCode::LOAD0);
+			append(unit, OpCode::LT);
+			append(unit, OpCode::IF, OpCode::ERROR, "P282 Calculation impossible");
+			break;
+		default:
+			break;
+		}
+		append(unit, opcode->second);
+		switch (opcode->second) {
+		case OpCode::ASIN:
+		case OpCode::ATAN:
+		case OpCode::ACOS:
+			append(unit, OpCode::TODEG);
+			break;
+		default:
+			break;
+		}
+		return true;
 	}
 };
 
-struct m_var : public Node {
-	Token c_var, uint;
-	addr_t ref;
+struct Value {
+	Any<Literal, LoadVar> value;
+	Any<Function, Braced> subexpr;
 
-	m_var(Lexer & lexer) : Node{lexer},
-	    c_var{lexer.get<TType::C_VAR>()} {
-		if (!this->c_var) {
-			return;
-		}
-		this->uint = lexer.get<TType::UINT>();
-		if (this->uint) {
-			std::istringstream{this->uint.str} >> this->ref;
-			construct(true);
-		}
-	}
+	template <typename... ArgTs>
+	Value(Expr_base & expr, ArgTs &... args) :
+	    value{args...}, subexpr{expr, args...} {}
 
-	bool isLocal() const {
-		return this->ref < 34;
-	}
-
-	virtual void emit(AddrMeta &, Unit & unit) const override {
-		if (this->ref < 34) {
-			append(unit, OpCode::LLOAD, this->ref);
-		} else /*if (this->ref < 200 ||
-		           (this->ref >= 500 && this->ref < 1000))*/ {
-			append(unit, OpCode::GLOAD, this->ref);
-		}
+	bool operator ()(char const * & it) {
+		return value(it) || subexpr(it);
 	}
 };
 
-struct m_expr;
-struct m_function;
-struct m_brackets;
-struct m_op_unary;
-struct m_op_binary;
+struct OpUnary : Parse {
+	using Parse::Parse;
 
-struct m_value : public Node {
-	Node_ptr child;
-
-	m_value(Lexer & lexer) : Node{lexer} {
-		construct(any<m_var, m_literal, m_brackets, m_function>
-		              (this->child, lexer));
-	}
-
-	virtual void emit(AddrMeta & meta, Unit & unit) const override {
-		this->child->emit(meta, unit);
+	bool operator ()(char const * & it) {
+		switch (*it) {
+		case '-':
+			append(unit, OpCode::NEG);
+		case '+':
+			break;
+		default:
+			return false;
+		}
+		++it;
+		return true;
 	}
 };
 
-struct m_op_binary : public Node {
-	Node_ptr lhs, rhs;
-	Token token;
-	OpCode opcode;
-	m_op_binary(Lexer & lexer) : Node{lexer} {
-		this->token = lexer.get<TType::OP_MUL, TType::OP_ADD, TType::OP_COMP>();
-		if (!this->token) {
-			return;
+struct OpBinary : Parse {
+	using Parse::Parse;
+
+	bool operator ()(char const * & it) {
+		size_t cnt = 0;
+		if (is_in(*it, "*/+-")) {
+			cnt = 1;
+		} else {
+			for (; it[cnt] >= 'A' && it[cnt] <= 'Z'; ++cnt);
 		}
 
-		for (auto & oppair : opmap) {
-			if (this->token.str == oppair.c_str) {
-				this->opcode = oppair.op;
-				construct(true);
-				break;
-			}
+		string_t match{it, cnt};
+		auto opcode = opmap.find(match);
+
+		if (opcode == std::end(opmap)) {
+			return false;
 		}
-	}
 
-	virtual TType type() const override { return this->token.type; }
-
-	virtual void emit(AddrMeta & meta, Unit & unit) const override {
-		this->lhs->emit(meta, unit);
-		this->rhs->emit(meta, unit);
-		switch (this->opcode) {
+		switch (opcode->second) {
 		case OpCode::DIV:
 			append(unit, OpCode::CLONE, addr_t{1});
 			append(unit, OpCode::LOAD0);
@@ -467,487 +539,507 @@ struct m_op_binary : public Node {
 			append(unit, OpCode::NEI, OpCode::OR);
 			break;
 		default:
-			append(unit, this->opcode);
+			append(unit, opcode->second);
 			break;
 		}
+
+		it += cnt;
+		return true;
 	}
 };
 
-struct m_op_unary : public Node {
-	Node_ptr rhs;
-	Token token;
-	OpCode opcode;
-	m_op_unary(Lexer & lexer) : Node{lexer},
-	    token{lexer.get<TType::OP_UNARY>()} {
-		if        (this->token.str == "+") {
-			this->opcode = OpCode::NOP;
-		} else if (this->token.str == "-") {
-			this->opcode = OpCode::NEG;
-		} else {
-			return;
+enum class TokenT {
+	NIL, OP_UNARY, OP_MUL, OP_ADD, OP_COMP, VALUE
+};
+
+constexpr char const * const operators[][6] {
+	{},                                    /**< TokenType::NIL */
+	{"+", "-"},                            /**< TokenType::OP_UNARY */
+	{"*", "/", "MOD", "AND"},              /**< TokenType::OP_MUL */
+	{"+", "-", "OR", "XOR"},               /**< TokenType::OP_ADD */
+	{"EQ", "NE", "GT", "LT", "GE", "LE"},  /**< TokenType::OP_COMP */
+};
+
+struct Token {
+	TokenT type;
+	char const * begin;
+	char const * end;
+
+	std::unique_ptr<Token> lhs;
+	std::unique_ptr<Token> rhs;
+
+	operator bool() const {
+		return this->type != TokenT::NIL;
+	}
+};
+
+struct Tokenise : Comment {
+	using Comment::Comment;
+
+	Token unary(char const * & it) {
+		Comment::operator ()(it);
+		auto const start = it;
+		auto cnt =
+		    match_start(it, operators[to_value(TokenT::OP_UNARY)]);
+		if (cnt) {
+			it += cnt;
+			return Token{TokenT::OP_UNARY, start, it};
 		}
-		construct(true);
+		return Token{TokenT::NIL, nullptr, nullptr};
 	}
 
-	virtual TType type() const override { return this->token.type; }
-
-	virtual void emit(AddrMeta & meta, Unit & unit) const override {
-		this->rhs->emit(meta, unit);
-		if (this->opcode != OpCode::NOP) {
-			append(unit, this->opcode);
-		}
-	}
-};
-
-struct m_brackets : public Node {
-	Token open;
-	Node_ptr expr;
-	Token close;
-
-	m_brackets(Lexer & lexer) : Node{lexer},
-	    open{lexer.get<TType::BRACKET_SQU_OPEN>()} {
-	    	if (!this->open) {
-	    		return;
-	    	}
-	    	if (!make<m_expr>(this->expr, lexer)) {
-	    		return;
-	    	}
-		this->close = lexer.get<TType::BRACKET_SQU_CLOSE>();
-		construct(this->close);
-	}
-
-	virtual void emit(AddrMeta & meta, Unit & unit) const override {
-		this->expr->emit(meta, unit);
-	}
-};
-
-struct m_function : public Node {
-	Token name;
-	Node_ptr arg;
-	OpCode opcode;
-	m_function(Lexer & lexer) : Node{lexer},
-	    name{lexer.get<TType::KEYWORD>()} {
-		if (!this->name) { return; }
-
-		for (auto & oppair : opmap) {
-			if (this->name.str == oppair.c_str) {
-				this->opcode = oppair.op;
-				construct(make<m_brackets>(this->arg, lexer));
-				break;
+	Token binary(char const * & it) {
+		Comment::operator ()(it);
+		auto const start = it;
+		for (auto const type : {TokenT::OP_MUL, TokenT::OP_ADD,
+		                        TokenT::OP_COMP}) {
+			auto cnt = match_start(it, operators[to_value(type)]);
+			if (cnt) {
+				it += cnt;
+				return Token{type, start, it};
 			}
 		}
+		return Token{TokenT::NIL, nullptr, nullptr};
 	}
 
-	virtual void emit(AddrMeta & meta, Unit & unit) const override {
-		this->arg->emit(meta, unit);
-		switch (this->opcode) {
-		case OpCode::SIN:
-		case OpCode::COS:
-		case OpCode::TAN:
-			append(unit, OpCode::FROMDEG);
-			break;
-		case OpCode::SQRT:
-		case OpCode::LN:
-			append(unit, OpCode::CLONE, addr_t{1});
-			append(unit, OpCode::LOAD0);
-			append(unit, OpCode::LT);
-			append(unit, OpCode::IF, OpCode::ERROR, "P282 Calculation impossible");
-			break;
-		default:
-			break;
+	Token value(char const * & it) {
+		Comment::operator ()(it);
+		auto const start = it;
+		if (*it == '#') {
+			auto ptr = it + 1;
+			Comment::operator ()(ptr);
+			if (is_num(*ptr)) {
+				while (is_num(*++ptr));
+				it = ptr;
+				return Token{TokenT::VALUE, start, it};
+			}
 		}
-		append(unit, this->opcode);
-		switch (this->opcode) {
-		case OpCode::ASIN:
-		case OpCode::ATAN:
-		case OpCode::ACOS:
-			append(unit, OpCode::TODEG);
-			break;
-		default:
-			break;
+		if (is_num(*it)) {
+			while (is_num(*++it));
+			if (*it != '.') {
+				return Token{TokenT::VALUE, start, it};
+			}
 		}
+		if (*it == '.') {
+			while (is_num(*++it));
+			return Token{TokenT::VALUE, start, it};
+		}
+		auto ptr = it;
+		if (auto cnt = match_start(ptr, "SIN", "COS", "TAN", "ASIN",
+		                           "ATAN", "ACOS", "SQRT", "SQR",
+		                           "ABS", "BIN", "BCD", "ROUND",
+		                           "RND", "FIX", "FUP", "LN", "EXP")) {
+			ptr += cnt;
+			Comment::operator ()(ptr);
+		}
+		if (*ptr == '[') {
+			int cnt = 1;
+			for (size_t i = 1; ptr[i]; ++i) {
+				switch (ptr[i]) {
+				case '[':
+					++cnt;
+					break;
+				case ']':
+					if (!--cnt) {
+						it = ptr + i + 1;
+						return {TokenT::VALUE,
+						        start, it};
+					}
+					break;
+				}
+			}
+		}
+		return Token{TokenT::NIL, nullptr, nullptr};
 	}
+
 };
 
-struct m_expr : public Node {
-	Node_ptr node;
+struct Expr : Parse, Expr_base {
+	Value value;
+	OpUnary unary;
+	OpBinary binary;
+	Tokenise tokenise;
 
-	m_expr(Lexer & lexer) : Node{lexer} {
-		/* create an alternating list of operators and values */
-		std::vector<Node_ptr> nodes;
-		Node_ptr node;
-		if (make<m_op_unary>(node, lexer)) {
-			nodes.push_back(std::move(node));
+	template <class... ArgTs> Expr(ArgTs &... args) :
+	    Parse{args...}, value{*this, args...}, unary{args...},
+	    binary{args...}, tokenise{args...} {}
+
+	virtual bool operator ()(char const * & it) override {
+		auto ptr = it;
+		std::vector<Token> tokens;
+
+		/* tokenise the expression */
+		Token token = tokenise.unary(ptr);
+		if (token) {
+			tokens.push_back(std::move(token));
 		}
 
 		while (true) {
-			if (make<m_value>(node, lexer)) {
-				nodes.push_back(std::move(node));
+			if ((token = tokenise.value(ptr))) {
+				tokens.push_back(std::move(token));
 			} else {
-				return;
+				return false;
 			}
-			if (make<m_op_binary>(node, lexer)) {
-				nodes.push_back(std::move(node));
+
+			if ((token = tokenise.binary(ptr))) {
+				tokens.push_back(std::move(token));
 			} else {
 				break;
 			}
-			/* unary operators may appear behind comparison
-			 * operators */
-			if (nodes.back()->type() == TType::OP_COMP &&
-			    make<m_op_unary>(node, lexer)) {
-				nodes.push_back(std::move(node));
+
+			if (tokens.back().type == TokenT::OP_COMP &&
+			    (token = tokenise.unary(ptr))) {
+				tokens.push_back(std::move(token));
 			}
 		}
+		it = ptr;
 
-		/* bind operators in order of preference */
-		for (auto type : {TType::OP_MUL, TType::OP_ADD, TType::OP_COMP}) {
-			/* bind rhs to unary operator */
+		/* build a tree */
+		for (auto type : {TokenT::OP_MUL, TokenT::OP_ADD,
+		                  TokenT::OP_COMP}) {
+			/* bind unary operators */
 			for (size_t i = 0;
-			     type == TType::OP_ADD && i < nodes.size() - 1;
+			     type == TokenT::OP_ADD && i < tokens.size();
 			     ++i) {
-				if (nodes[i]->type() == TType::OP_UNARY) {
-					auto op = static_cast<m_op_unary *>(nodes[i].get());
-					op->rhs = std::move(nodes[i + 1]);
-					nodes.erase(nodes.begin() + i + 1);
+				if (tokens[i].type != TokenT::OP_UNARY) {
+					continue;
 				}
+				tokens[i].rhs =
+				    std::make_unique<Token>(std::move(tokens[i + 1]));
+				tokens.erase(std::begin(tokens) + i + 1);
 			}
 
-			/* bind lhs and rhs to operator */
-			for (size_t i = 1; i < nodes.size() - 1;) {
-				if (nodes[i]->type() == type) {
-					std::swap(nodes[i - 1], nodes[i]);
-					auto op = static_cast<m_op_binary *>(nodes[i - 1].get());
-					op->lhs = std::move(nodes[i]);
-					op->rhs = std::move(nodes[i + 1]);
-					nodes.erase(nodes.begin() + i,
-					            nodes.begin() + i + 2);
+			/* bind arguments to binary operators */
+			for (size_t i = 1; i < tokens.size() - 1;) {
+				if (tokens[i].type == type) {
+					std::swap(tokens[i - 1], tokens[i]);
+					auto & op = tokens[i - 1];
+					op.lhs =
+					    std::make_unique<Token>(
+					        std::move(tokens[i]));
+					op.rhs =
+					    std::make_unique<Token>(
+					        std::move(tokens[i + 1]));
+					tokens.erase(std::begin(tokens) + i,
+					             std::begin(tokens) + i + 2);
 				} else {
 					++i;
 				}
 			}
 		}
 
-		/* finalise node */
-		if (nodes.size() == 1) {
-			this->node = std::move(nodes[0]);
-			construct(true);
-		}
-	}
+		assert(tokens.size() == 1 && "must be a bug!");
+		/* emit the code */
+		auto const emit = [&](auto & self, Token & token) -> void {
+			if (token.lhs) { self(self, *token.lhs); }
+			if (token.rhs) { self(self, *token.rhs); }
+			switch (token.type) {
+			case TokenT::VALUE:
+				value(token.begin);
+				break;
+			case TokenT::OP_UNARY:
+				unary(token.begin);
+				break;
+			default:
+				binary(token.begin);
+				break;
+			}
+		};
+		emit(emit, tokens[0]);
 
-	virtual void emit(AddrMeta & meta, Unit & unit) const override {
-		this->node->emit(meta, unit);
-	}
-};
-
-struct m_assign : public Node {
-	m_var lhs;
-	Token token;
-	OpCode opcode;
-	m_expr rhs;
-
-	m_assign(Lexer & lexer) : Node{lexer},
-	    lhs{lexer}, token{lexer.get<TType::C_ASSIGN>()}, rhs{lexer} {
-		construct(this->lhs.constructed &&
-		          this->token &&
-		          this->rhs.constructed);
-	}
-
-	virtual void emit(AddrMeta & meta, Unit & unit) const override {
-		this->rhs.emit(meta, unit);
-		if (this->lhs.isLocal()) {
-			append(unit, OpCode::LSTORE);
-		} else {
-			append(unit, OpCode::GSTORE);
-		}
-		append(unit, addr_t{this->lhs.ref});
+		return true;
 	}
 };
 
-struct m_comment : public Node {
-	Token token;
-	m_comment(Lexer & lexer) : Node{lexer},
-	    token{lexer.get<TType::COMMENT>()} {
-		construct(this->token);
-	}
+struct Assign : Parse {
+	All<Comment> comment;
+	Var var;
+	AssignVar assign;
+	Expr expr;
 
-	virtual void emit(AddrMeta & meta, Unit & unit) const override {
-		append(unit, OpCode::PRINT, this->token.str);
+	template <class... ArgTs> Assign(ArgTs &... args) :
+	    Parse{args...}, comment{args...}, var{args...}, assign{args...},
+	    expr{args...} {}
+
+	bool operator ()(char const * & it) {
+		auto ptr = it;
+		if (!var(ptr, [](addr_t const) {}, [](addr_t const) {})) {
+			return false;
+		}
+		comment(ptr);
+		if (*ptr != '=') {
+			return false;
+		}
+		++ptr;
+		if (!expr(ptr)) {
+			return false;
+		}
+		assign(it);
+		it = ptr;
+		return true;
 	}
 };
 
-struct block;
+struct Goto : Parse {
+	All<Comment> comment;
+	Expr expr;
 
-struct m_while : public Node {
-	Token cmd;
-	Node_ptr expr;
-	Token branch, branchval, terminator;
-	Node_ptr child;
-	Token end, endval;
+	template <class... ArgTs> Goto(ArgTs &... args) :
+	    Parse{args...}, comment{args...}, expr{args...} {}
 
-	m_while(Lexer & lexer) : Node{lexer},
-	    cmd{lexer.get<TType::KEYWORD>()} {
-		if (!(this->cmd &&
-		      this->cmd.str == "WHILE" &&
-		      make<m_brackets>(this->expr, lexer) &&
-		      (this->branch = lexer.get<TType::KEYWORD>()) &&
-		      this->branch.str == "DO" &&
-		      (this->branchval = lexer.get<TType::UINT>()) &&
-		      (this->terminator = lexer.get<TType::ENDLINE>()))) {
-		      	return;
-		}
-		make<block>(this->child, lexer);
-		if ((this->end = lexer.get<TType::KEYWORD>()) &&
-		    this->end.str == "END" &&
-		    (this->endval = lexer.get<TType::UINT>()) &&
-		    this->endval.str == this->branchval.str) {
-			construct(true);
-		}
-	}
-
-	virtual void emit(AddrMeta & meta, Unit & unit) const override {
-		addr_t const begin = unit.code.size();
-		this->expr->emit(meta, unit);
-		append(unit, OpCode::NOT, OpCode::IF, OpCode::GOTO);
-		addr_t const gotoend = unit.code.size();
-		append(unit, addr_t{0});
-		if (this->child != nullptr) {
-			this->child->emit(meta, unit);
-		}
-		append(unit, OpCode::GOTO, begin);
-		addr_t const end = unit.code.size();
-		update(unit, gotoend, end);
-	}
-};
-
-struct m_label : public Node {
-	Token label, lval;
-	addr_t value;
-	m_label(Lexer & lexer) : Node{lexer},
-	    label{lexer.get<TType::C_LABEL>()},
-	    lval{lexer.get<TType::UINT>()} {
-		if (this->label && this->lval) {
-			std::istringstream{lval.str} >> this->value;
-			construct(true);
-		}
-	}
-
-	virtual void emit(AddrMeta &, Unit & unit) const override {
-		append(unit, OpCode::LBL, this->value);
-	}
-};
-
-struct m_goto : public Node {
-	Token token;
-	Node_ptr value;
-	m_goto(Lexer & lexer) : Node{lexer},
-	    token{lexer.get<TType::KEYWORD>()} {
-		if (!this->token || this->token.str != "GOTO") {
-			return;
-		}
-		construct(make<m_value>(this->value, lexer));
-	}
-
-	virtual void emit(AddrMeta & meta, Unit & unit) const override {
-		this->value->emit(meta, unit);
+	bool operator ()(char const * & it) {
+		comment(it);
+		auto cnt = match_start(it, "GOTO");
+		if (!cnt) { return false; }
+		auto ptr = it + cnt;
+		if (!expr(ptr)) { return false; }
+		it = ptr;
+		append(unit, OpCode::LOADSTR, string_t{"P231 No squence No."});
+		append(unit, OpCode::FLIP, addr_t{2});
 		append(unit, OpCode::GOTOLBL);
+		return true;
 	}
 };
 
-struct m_if : public Node {
-	Token token;
-	Node_ptr expr;
-	Node_ptr go;
-	m_if(Lexer &  lexer) : Node{lexer},
-	    token{lexer.get<TType::KEYWORD>()} {
-		if (!this->token || this->token.str != "IF") { return; }
-		construct(make<m_brackets>(this->expr, lexer) &&
-		          make<m_goto>(this->go, lexer));
-	}
+struct If : Parse {
+	All<Comment> comment;
+	Expr expr;
+	Braced braced;
+	Goto go;
 
-	virtual void emit(AddrMeta & meta, Unit & unit) const override {
-		this->expr->emit(meta, unit);
-		ifelse(unit, [&]() { this->go->emit(meta, unit); });
+	template <class... ArgTs> If(ArgTs &... args) :
+	    Parse{args...}, comment{args...}, expr{args...},
+	    braced{expr, args...}, go{args...} {}
+
+	bool operator ()(char const * & it) {
+		comment(it);
+		auto cnt = match_start(it, "IF");
+		if (!cnt) { return false; }
+		auto ptr = it + cnt;
+		if (!braced(ptr)) { return false; }
+		it = ptr;
+		ifelse(unit, [&]() {
+			if (!go(it)) {
+				append(unit, OpCode::WARN, "failed to parse GOTO behind IF");
+			}
+		});
+		return true;
 	}
 };
 
-/*
- * ISO style blocks.
- */
+struct While : Parse {
+	All<Comment> comment;
+	Expr expr;
+	Braced braced;
 
-/**
- * Keywords that must not be matched as words.
- */
-struct notwords : public Node {
-	Token token;
-	
-	notwords(Lexer & lexer) : Node{lexer},
-	    token{lexer.get<TType::KEYWORD>()} {
-		construct(this->token && this->token.str == "END");
+	template <class... ArgTs> While(ArgTs &... args) :
+	    Parse{args...}, comment{args...}, expr{args...},
+	    braced{expr, args...} {}
+
+	bool operator ()(char const * & it) {
+		comment(it);
+		auto cnt = match_start(it, "WHILE");
+		if (!cnt) { return false; }
+		auto ptr = it + cnt;
+		addr_t const begin = unit.code.size();
+		if (!braced(ptr)) { return false; }
+		comment(ptr);
+		cnt = match_start(ptr, "DO");
+		if (!cnt) { goto fail; }
+		ptr += cnt;
+		comment(ptr);
+		cnt = 0;
+		for (; is_num(ptr[cnt]); ++cnt);
+		if (!cnt) { goto fail; }
+		it = ptr + cnt;
+		append(unit, OpCode::NOT, OpCode::IF, OpCode::GOTO);
+		meta.whiledo.push_back({extract_addr(ptr, cnt), begin,
+		                        static_cast<addr_t>(unit.code.size())});
+		append(unit, addr_t{0});
+		return true;
+	fail:
+		unit.code.erase(std::begin(unit.code) + begin,
+		                std::end(unit.code));
+		return false;
 	}
-
-	virtual void emit(AddrMeta &, Unit &) const override {}
 };
 
-struct endwords : public Node {
-	Token token;
+struct End : Parse {
+	All<Comment> comment;
 
-	endwords(Lexer & lexer) : Node{lexer},
-	    token{lexer.get<TType::ENDLINE>()} {
-		construct(this->token);
+	template <class... ArgTs> End(ArgTs &... args) :
+	    Parse{args...}, comment{args...} {}
+
+	bool operator ()(char const * & it) {
+		comment(it);
+		auto cnt = match_start(it, "END");
+		if (!cnt) { return false; }
+		auto ptr = it + cnt;
+		comment(ptr);
+		cnt = 0;
+		for (; is_num(ptr[cnt]); ++cnt);
+		if (!cnt) { return false; }
+		auto const id = extract_addr(ptr, cnt);
+		it = ptr;
+		append(unit, OpCode::GOTO, meta.whiledo.back().loop);
+		update(unit, meta.whiledo.back().end,
+		       static_cast<addr_t>(unit.code.size()));
+		if (meta.whiledo.back().id != id) {
+			append(unit, OpCode::ERROR, "DO/END mismatch");
+		}
+		meta.whiledo.pop_back();
+		return true;
 	}
+};
 
-	virtual void emit(AddrMeta & meta, Unit & unit) const override {
+struct Word : Parse {
+	All<Comment> comment;
+	Expr expr;
+
+	template <class... ArgTs> Word(ArgTs &... args) :
+	    Parse{args...}, comment{args...}, expr{args...} {}
+
+	bool operator ()(char const * & it) {
+		comment(it);
+		word_t name {""};
+		if (it[0] == ',' && it[1] >= 'A' && it[1] <= 'Z') {
+			name.str[0] = it[0];
+			name.str[1] = it[1];
+			it += 2;
+		} else if (it[0] >= 'A' && it[0] <= 'Z') {
+			name.str[0] = it[0];
+			++it;
+		} else {
+			return false;
+		}
+		if (!expr(it)) {
+			append(unit, OpCode::LOAD0);
+		}
+		append(unit, OpCode::BAPPEND, name);
+		return true;
+	}
+};
+
+struct String : Parse {
+	All<Comment> comment;
+
+	template <class... ArgTs> String(ArgTs &... args) :
+	    Parse{args...}, comment{args...} {}
+
+	bool operator ()(char const * & it) {
+		comment(it);
+		if (*it != '<') { return false; }
+		size_t cnt = 1;
+		for (; it[cnt] && it[cnt] != '>'; ++cnt);
+		if (!it[cnt]) { return false; }
+		string_t const str{it + 1, cnt - 1};
+		it += cnt + 1;
+		append(unit, OpCode::LOADSTR, str);
+		append(unit, OpCode::BAPPEND, word_t{"STR"});
+		meta.wanted.push_back(str);
+		return true;
+	}
+};
+
+struct Commit : Parse {
+	using Parse::Parse;
+	bool operator ()(char const * & it) {
 		append(unit, OpCode::LCALL);
-		meta.calls.push_back({"/CHECKS/BCOMMIT/",
+		meta.calls.push_back({unit.strmap["/checks/bcommit/"],
 		                      static_cast<addr_t>(unit.code.size())});
 		append(unit, addr_t{0});
+		return true;
 	}
 };
 
-struct words : public Node {
-	Token token;
-	Node_ptr expr;
-	Node_ptr next;
-
-	words(Lexer & lexer) : Node{lexer},
-	    token{lexer.get<TType::WORD, TType::STRING>()} {
-		if (!this->token) { return; }
-		switch (this->token.type) {
-		case TType::WORD:
-			make<m_expr>(this->expr, lexer);
-			break;
-		default:
-			break;
-		}
-		construct(any<words, endwords>(this->next, lexer));
+void parse(Meta & meta, Unit & unit, string_t const & file) {
+	/* Has the file already been parsed? */
+	if (meta.parsed.count(file)) {
+		return;
 	}
 
-	virtual void emit(AddrMeta & meta, Unit & unit) const override {
-		switch (this->token.type) {
-		case TType::WORD:
-			if (this->expr) {
-				this->expr->emit(meta, unit);
-			} else {
-				append(unit, OpCode::LOAD0);
-			}
-			{
-				word_t name{""};
-				for (size_t i = 0; i < this->token.str.size(); ++i) {
-					name.str[i] = this->token.str[i];
-				}
-				append(unit, OpCode::BAPPEND, name);
-			}
-			break;
-		case TType::STRING:
-			append(unit, OpCode::LOADSTR,
-			       string_t{std::begin(this->token.str) + 1,
-			                std::end(this->token.str) - 1});
-			append(unit, OpCode::BAPPEND, word_t{"STR"});
-			break;
-		default:
+	/* Register program. */
+	meta.parsed[file] = unit.code.size();
+
+	/* Binary mode prevents windows from messing with us. */
+	std::ifstream in{file, std::ifstream::binary};
+	if (!in) {
+		addr_t const begin = unit.code.size();
+		append(unit, OpCode::ERROR,
+		       file + ": cannot be accessed");
+		append(unit, OpCode::WRAPLBL, begin);
+		return;
+	}
+
+	using Macro = Any<Assign, Goto, If, End, While>;
+	using GCode = Seq<AllOnce<Any<Word, String>>, Commit>;
+	Seq<Opt<Label>, Any<Macro, GCode>, All<Comment>>
+	    lineparser{meta, unit, file};
+
+	char buf[MAXLINE]{};
+	for (size_t lineno = 1; in.getline(buf, sizeof(buf)); ++lineno) {
+		char const * it = buf;
+		
+		lineparser(it);
+		
+		if (*it) {
+			std::ostringstream stream{};
+			stream << file << ':' << lineno << ':'
+			       << (it - buf + 1)
+			       << ": could not parse: " << it;
+			append(unit, OpCode::ERROR, stream.str());
 			break;
 		}
-		if (this->next) {
-			this->next->emit(meta, unit);
-		}
-	}
-};
-
-/*
- * block node
- */
-
-struct block : public Node {
-	Node_ptr node;
-	Token terminator;
-	Node_ptr next;
-
-	block(Lexer & lexer) : Node{lexer} {
-		/* termination optional */
-		if (any<m_label, m_comment>(this->node, lexer)) {
-			this->terminator = lexer.get<TType::ENDLINE>();
-			make<block>(this->next, lexer);
-			construct(true);
-			return;
-		}
-		/* empty line */
-		if ((this->terminator = lexer.get<TType::ENDLINE>())) {
-			make<block>(this->next, lexer);
-			construct(true);
-			return;
-		}
-		/* termination obligatory */
-		if (any<m_assign, m_while, m_goto, m_if>(this->node, lexer) &&
-		    (this->terminator = lexer.get<TType::ENDLINE>())) {
-			make<block>(this->next, lexer);
-			construct(true);
-			return;
-		}
-		/* bail on certtain keywords */
-		if (make<notwords>(this->node, lexer)) { return; }
-		/* match gcode blocks */
-		if (make<words>(this->node, lexer)) {
-			make<block>(this->next, lexer);
-			construct(true);
-			return;
-		}
 	}
 
-	virtual void emit(AddrMeta & meta, Unit & unit) const override {
-		if (this->constructed) {
-			if (this->node) {
-				this->node->emit(meta, unit);
-			}
-			if (this->next) {
-				this->next->emit(meta, unit);
-			}
-		}
+	append(unit, OpCode::WRAPLBL, meta.parsed[file]);
+	while (meta.wanted.size()) {
+		auto want = meta.wanted.back();
+		meta.wanted.pop_back();
+		parse(meta, unit, want);
 	}
-};
+}
 
-struct pgm : Node {
-	Node_ptr child;
-	Token eof;
+} /* namespace */
 
-	pgm(Lexer & lexer) : Node{lexer} {
-		construct(make<block>(this->child, lexer));
-		if (this->child) {
-			this->eof = lexer.get<TType::ENDFILE>();
-		}
+void ncmacro::m700v::parse(Unit & unit, FileNames const & files) {
+	Meta meta;
+	unit.strmap["/checks/bcommit/"] = unit.strings.size();
+	unit.strings.push_back("/checks/bcommit/");
+
+	for (auto const & file : files) {
+		parse(meta, unit, file);
 	}
 
-	virtual void emit(AddrMeta & meta, Unit & unit) const override {
-		if (this->constructed) {
-			this->child->emit(meta, unit);
-			if (!this->eof) {
-				append(unit, OpCode::WARN,
-				       meta.pgms.back().name +
-				       ": could not be parsed to the end");
-			}
-			append(unit, OpCode::WRAPLBL, meta.pgms.back().addr);
-		}
-	}
-};
+	/* gcode commit code */
 
-void finalise(AddrMeta & meta, Unit & unit) {
-	meta.pgms.push_back({"/CHECKS/BCOMMIT/",
-	                     static_cast<addr_t>(unit.code.size())});
+	meta.parsed["/checks/bcommit/"] = unit.code.size();
 
 	/*
 	 * Not passed on to the callback interface.
 	 */
+
 	/* M98 */
 	append(unit, OpCode::BMATCH, word_t{"M"}, value_t{98});
 	ifelse(unit, [&]() {
-		for (auto const & pgm : meta.pgms) {
-			append(unit, OpCode::LOADSTR, pgm.name);
+		auto const end = std::end(meta.parsed);
+		for (auto it = std::begin(meta.parsed); it != end; ++it) {
+			append(unit, OpCode::LOADSTR, it->first);
 			append(unit, OpCode::BLOAD, word_t{"STR"}, addr_t{0});
 			append(unit, OpCode::EQ);
 			ifelse(unit, [&]() {
-				append(unit, OpCode::BLOAD, word_t{"L"},
-				       addr_t{0}); 
-				append(unit, OpCode::BFLUSH);
-				append(unit, OpCode::CALLLBL, pgm.addr);
+				append(unit, OpCode::BHAS, word_t{"L"});
+				ifelse(unit, [&]() {
+					append(unit, OpCode::LOADSTR,
+					       string_t{"P231 No squence No."});
+					append(unit, OpCode::BLOAD, word_t{"L"},
+					       addr_t{0}); 
+					append(unit, OpCode::BFLUSH);
+					append(unit, OpCode::CALLLBL, it->second);
+				}, [&]() {
+					append(unit, OpCode::BFLUSH);
+					append(unit, OpCode::CALL, it->second);
+				});
 				append(unit, OpCode::LRET);
 			});
 		}
@@ -979,32 +1071,10 @@ void finalise(AddrMeta & meta, Unit & unit) {
 
 	/* Update unresolved calls. */
 	for (auto const & call : meta.calls) {
-		for (auto const & pgm : meta.pgms) {
-			if (pgm.name == call.name) {
-				update(unit, call.addr, pgm.addr);
-				break;
-			}
-		}
+		auto & str = unit.strings[call.nameid];
+		auto const it = meta.parsed.find(str);
+		assert(it != std::end(meta.parsed) &&
+		       "every file should exist, even missing files");
+		update(unit, call.addr, it->second);
 	}
-};
-
-} /* namespace */
-
-void ncmacro::m700v::parse(Unit & unit, FileNames const & files) {
-	AddrMeta meta;
-	for (auto const & file : files) {
-		/* Open in binary mode so MS Windows does not mangle files. */
-		std::ifstream in{file, std::ifstream::binary};
-		Lexer lexer{in};
-		Node_ptr root;
-		addr_t pgmstart = unit.code.size();
-		meta.pgms.push_back({file, pgmstart});
-		unit.strings.push_back(file);
-
-		if (make<pgm>(root, lexer)) {
-			root->emit(meta, unit);
-		}
-	}
-
-	finalise(meta, unit);
 }
