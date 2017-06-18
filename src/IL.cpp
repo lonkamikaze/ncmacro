@@ -405,30 +405,38 @@ void run(Unit const & unit, Callback & callback, Memory & global) {
 			{
 				/* backup lbl */
 				auto lbl = pop(global.stack);
+				auto emsg = pop(global.stack);
 				push(global.stack, pc);
 				pc = get<addr_t>(argp);
 				local.push(Ram{});
 				/* put label back on top of the stack */
+				push(global.stack, emsg);
 				push(global.stack, lbl);
 			}
 			/* fallthrough */
 		case OpCode::GOTOLBL:
-			for (auto addr = pc + wordcount(get<OpCode>(begin + pc));
-			     addr != pc;) {
+			{ auto addr = pc; do {
+				if (addr >= unit.code.size()) {
+					addr = 0;
+				}
 				if (get<OpCode>(begin + addr) == OpCode::LBL &&
 				    get<addr_t>(begin + addr + sizeof(OpCode))
 				    == global.stack.back()) {
 					pc = addr;
 					break;
 				}
-				addr += wordcount(get<OpCode>(begin + addr));
-				if (addr >= unit.code.size()) {
-					addr = 0;
-				} else if (get<OpCode>(begin + addr) ==
-				           OpCode::WRAPLBL) {
+				if (get<OpCode>(begin + addr) ==
+				    OpCode::WRAPLBL) {
 					addr = get<addr_t>(begin + addr +
 					                   sizeof(OpCode));
+					continue;
 				}
+				addr += wordcount(get<OpCode>(begin + addr));
+			} while(addr != pc); }
+			global.stack.pop_back();
+			if (get<OpCode>(begin + pc) != OpCode::LBL) {
+				callback.error(unit.strings[static_cast<addr_t>(pop(global.stack))]);
+				return;
 			}
 			global.stack.pop_back();
 			break;

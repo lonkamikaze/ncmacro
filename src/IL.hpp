@@ -114,8 +114,10 @@ enum class OpCode : uint8_t {
 	GOTO,    /**< Set PC. */
 	EXIT,    /**< Terminate execution. */
 	LBL,     /**< Argument is a label for GOTOLBL. */
-	CALLLBL, /**< CALL and GOTOLBL. */
-	GOTOLBL, /**< Go to the next matching LBL. */
+	CALLLBL, /**< CALL and GOTOLBL, expects an error string and
+	          **< the label on top of the stack. */
+	GOTOLBL, /**< Go to the next matching LBL. Expects an error
+	          **< string and a LBL on to pof the stack. */
 	WRAPLBL, /**< When reaching this during LBL search, start from arg. */
 	IF,      /**< Execute next instruction if value is not 0. */
 	MUL,     /**< Multiply. */
