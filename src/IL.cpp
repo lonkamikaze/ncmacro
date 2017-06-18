@@ -196,10 +196,10 @@ constexpr char const * const opfmts[]{
 	"%6d  BMATCH  %.3s, %f\n",
 	"%6d  BHAS    %.3s\n",
 	"%6d  BLOAD   %.3s, %d\n",
-	"%6d  LOADSTR \"%.40s\"\n",
-	"%6d  PRINT   \"%.40s\"\n",
-	"%6d  WARN    \"%.40s\"\n",
-	"%6d  ERROR   \"%.40s\"\n",
+	"%6d  LOADSTR \"%.60s\"\n",
+	"%6d  PRINT   \"%.60s\"\n",
+	"%6d  WARN    \"%.60s\"\n",
+	"%6d  ERROR   \"%.60s\"\n",
 };
 
 static_assert(countof(opfmts) == static_cast<size_t>(OpCode::VERSION),
