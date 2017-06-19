@@ -773,6 +773,20 @@ void ncmacro::il::ifelse(Unit & unit, std::function<void()> const & doif,
 	update(unit, gotoendaddr, static_cast<addr_t>(unit.code.size()));
 }
 
+void ncmacro::il::repeat(Unit & unit, std::function<void()> const & statement) {
+	addr_t const begin = unit.code.size();
+	append(unit, OpCode::CLONE, addr_t{1});
+	append(unit, OpCode::NOT, OpCode::IF, OpCode::GOTO);
+	addr_t const gotoend = unit.code.size();
+	append(unit, addr_t{0});
+	append(unit, OpCode::LOAD1, OpCode::SUB);
+	statement();
+	append(unit, OpCode::GOTO, begin);
+	addr_t const end = unit.code.size();
+	update(unit, gotoend, end);
+	append(unit, OpCode::POP, addr_t{1});
+}
+
 std::ostream & ncmacro::il::operator <<(std::ostream & out, Unit const & unit) {
 	::printcode(out, unit, std::begin(unit.code), std::end(unit.code));
 	return out;
