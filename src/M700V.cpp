@@ -1028,6 +1028,15 @@ void ncmacro::m700v::parse(Unit & unit, FileNames const & files) {
 			append(unit, OpCode::BLOAD, word_t{"STR"}, addr_t{0});
 			append(unit, OpCode::EQ);
 			ifelse(unit, [&]() {
+				/* put the number of repetitions on the stack */
+				append(unit, OpCode::BHAS, word_t{"L"});
+				ifelse(unit, [&]() {
+					append(unit, OpCode::BLOAD,
+					       word_t{"L"}, addr_t{0});
+				}, [&]() {
+					append(unit, OpCode::LOAD1);
+				});
+				/* are we jumping to a label ? */
 				append(unit, OpCode::BHAS, word_t{"H"});
 				ifelse(unit, [&]() {
 					append(unit, OpCode::LOADSTR,
@@ -1035,10 +1044,24 @@ void ncmacro::m700v::parse(Unit & unit, FileNames const & files) {
 					append(unit, OpCode::BLOAD, word_t{"H"},
 					       addr_t{0}); 
 					append(unit, OpCode::BFLUSH);
-					append(unit, OpCode::CALLLBL, it->second);
+					/* put the repetitions on top */
+					append(unit, OpCode::FLIP, addr_t{3});
+					repeat(unit, [&]() {
+						append(unit, OpCode::FLIP,
+						       addr_t{3});
+						append(unit, OpCode::CLONE,
+						       addr_t{2});
+						append(unit, OpCode::CALLLBL,
+						       it->second);
+						append(unit, OpCode::FLIP,
+						       addr_t{3});
+					});
+					append(unit, OpCode::POP, addr_t{2});
 				}, [&]() {
 					append(unit, OpCode::BFLUSH);
-					append(unit, OpCode::CALL, it->second);
+					repeat(unit, [&]() {
+						append(unit, OpCode::CALL, it->second);
+					});
 				});
 				append(unit, OpCode::LRET);
 			});
