@@ -1028,11 +1028,11 @@ void ncmacro::m700v::parse(Unit & unit, FileNames const & files) {
 			append(unit, OpCode::BLOAD, word_t{"STR"}, addr_t{0});
 			append(unit, OpCode::EQ);
 			ifelse(unit, [&]() {
-				append(unit, OpCode::BHAS, word_t{"L"});
+				append(unit, OpCode::BHAS, word_t{"H"});
 				ifelse(unit, [&]() {
 					append(unit, OpCode::LOADSTR,
 					       string_t{"P231 No squence No."});
-					append(unit, OpCode::BLOAD, word_t{"L"},
+					append(unit, OpCode::BLOAD, word_t{"H"},
 					       addr_t{0}); 
 					append(unit, OpCode::BFLUSH);
 					append(unit, OpCode::CALLLBL, it->second);
