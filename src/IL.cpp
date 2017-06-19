@@ -746,7 +746,7 @@ void ncmacro::il::update(Unit & unit, addr_t const dst, addr_t const val) {
 	}
 }
 
-void ncmacro::il::ifelse(Unit & unit, std::function<void()> const doif) {
+void ncmacro::il::ifelse(Unit & unit, std::function<void()> const & doif) {
 	append(unit, OpCode::NOT, OpCode::IF, OpCode::GOTO);
 	addr_t const addr = unit.code.size();
 	append(unit, addr_t{0});
@@ -754,8 +754,8 @@ void ncmacro::il::ifelse(Unit & unit, std::function<void()> const doif) {
 	update(unit, addr, static_cast<addr_t>(unit.code.size()));
 }
 
-void ncmacro::il::ifelse(Unit & unit, std::function<void()> const doif,
-                         std::function<void()> const doelse) {
+void ncmacro::il::ifelse(Unit & unit, std::function<void()> const & doif,
+                         std::function<void()> const & doelse) {
 	append(unit, OpCode::IF, OpCode::GOTO);
 	addr_t const gotoifaddr = unit.code.size();
 	append(unit, addr_t{0});

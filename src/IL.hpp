@@ -201,8 +201,9 @@ void append(Unit & unit, Head head, Tail... tail) {
 
 void update(Unit &, addr_t const, addr_t const);
 
-void ifelse(Unit &, std::function<void()> const);
-void ifelse(Unit &, std::function<void()> const, std::function<void()> const);
+void ifelse(Unit &, std::function<void()> const &);
+void ifelse(Unit &, std::function<void()> const &,
+            std::function<void()> const &);
 
 std::ostream & operator <<(std::ostream &, Unit const &);
 
