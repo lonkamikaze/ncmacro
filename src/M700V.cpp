@@ -988,7 +988,6 @@ void parse(Meta & meta, Unit & unit, string_t const & file) {
 			       << (it - buf + 1)
 			       << ": could not parse: " << it;
 			append(unit, OpCode::ERROR, stream.str());
-			break;
 		}
 	}
 
