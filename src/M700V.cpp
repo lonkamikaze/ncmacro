@@ -1024,6 +1024,9 @@ void ncmacro::m700v::parse(Unit & unit, FileNames const & files) {
 		auto const end = std::end(meta.parsed);
 		for (auto it = std::begin(meta.parsed); it != end; ++it) {
 			append(unit, OpCode::LOADSTR, it->first);
+			append(unit, OpCode::BHAS, word_t{"P"}, OpCode::IF);
+			append(unit, OpCode::ERROR,
+			       string_t{"M98P is not supported, use M98<filename> instead."});
 			append(unit, OpCode::BLOAD, word_t{"STR"}, addr_t{0});
 			append(unit, OpCode::EQ);
 			ifelse(unit, [&]() {
