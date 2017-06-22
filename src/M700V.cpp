@@ -1068,7 +1068,7 @@ void ncmacro::m700v::parse(Unit & unit, FileNames const & files) {
 				append(unit, OpCode::LRET);
 			});
 		}
-		append(unit, OpCode::ERROR, "file called through M98 is not present");
+		append(unit, OpCode::ERROR, "P232 No program No.");
 	});
 	/* M99 */
 	append(unit, OpCode::BMATCH, word_t{"M"}, value_t{99});
