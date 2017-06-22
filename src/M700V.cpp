@@ -254,7 +254,7 @@ struct Comment : WhiteSpace {
 struct Label : Parse {
 	All<Comment> comment;
 	template <class... ArgTs> Label(ArgTs &... args) :
-		Parse{args...}, comment{args...} {};
+		Parse{args...}, comment{args...} {}
 
 	bool operator ()(char const * & it) {
 		comment(it);
@@ -271,7 +271,7 @@ struct Label : Parse {
 struct Literal : Parse {
 	All<Comment> comment;
 	template <class... ArgTs> Literal(ArgTs &... args) :
-		Parse{args...}, comment{args...} {};
+		Parse{args...}, comment{args...} {}
 
 	bool operator ()(char const * & it) {
 		comment(it);
@@ -302,7 +302,7 @@ struct Literal : Parse {
 struct Var : Parse {
 	All<Comment> comment;
 	template <class... ArgTs> Var(ArgTs &... args) :
-		Parse{args...}, comment{args...} {};
+		Parse{args...}, comment{args...} {}
 
 	bool operator ()(char const * & it,
 	                 std::function<void(addr_t const)> const & local,
