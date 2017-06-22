@@ -1073,6 +1073,7 @@ void ncmacro::m700v::parse(Unit & unit, FileNames const & files) {
 	/* M99 */
 	append(unit, OpCode::BMATCH, word_t{"M"}, value_t{99});
 	ifelse(unit, [&]() {
+		append(unit, OpCode::BFLUSH);
 		/* pop return address */
 		append(unit, OpCode::POP, addr_t{1});
 		/* return as if from caller */
