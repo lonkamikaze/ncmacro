@@ -373,7 +373,7 @@ void run(Unit const & unit, Callback & callback, Memory & global) {
 			}
 			break;
 		case OpCode::CALL:
-			push(global.stack, pc);
+			push(global.stack, pc + wordcount(OpCode::CALL));
 			pc = get<addr_t>(argp);
 			local.push(Ram{});
 			continue;
@@ -384,16 +384,16 @@ void run(Unit const & unit, Callback & callback, Memory & global) {
 			} else {
 				pc = 0;
 			}
-			break;
+			continue;
 		case OpCode::LCALL:
-			push(global.stack, pc);
+			push(global.stack, pc + wordcount(OpCode::LCALL));
 			pc = get<addr_t>(argp);
 			continue;
 		case OpCode::LRET:
 			pc = global.stack.size()
 			     ? static_cast<addr_t>(pop(global.stack))
 			     : addr_t{0};
-			break;
+			continue;
 		case OpCode::GOTO:
 			pc = get<addr_t>(argp);
 			continue;
@@ -406,7 +406,7 @@ void run(Unit const & unit, Callback & callback, Memory & global) {
 				/* backup lbl */
 				auto lbl = pop(global.stack);
 				auto emsg = pop(global.stack);
-				push(global.stack, pc);
+				push(global.stack, pc + wordcount(OpCode::CALLLBL));
 				pc = get<addr_t>(argp);
 				local.push(Ram{});
 				/* put label back on top of the stack */
@@ -439,7 +439,7 @@ void run(Unit const & unit, Callback & callback, Memory & global) {
 				return;
 			}
 			global.stack.pop_back();
-			break;
+			continue;
 		case OpCode::WRAPLBL:
 			return;
 		case OpCode::IF:
