@@ -18,18 +18,18 @@ class Output : public Callback {
 	Output(std::ostream & out, std::ostream & warn, std::ostream & err) :
 	    out{out}, wout{warn}, eout{err} {}
 
-        virtual void block(Block const &) override;
-        virtual void assign(addr_t const, value_t const) override;
-        virtual void print(string_t const &) override;
-        virtual void warn(string_t const &) override;
-        virtual void error(string_t const &) override;
+	virtual void block(Block const &) override;
+	virtual void assign(addr_t const, value_t const) override;
+	virtual void print(string_t const &) override;
+	virtual void warn(string_t const &) override;
+	virtual void error(string_t const &) override;
 };
 
 class Sparse : public Output {
 	public:
 	using Output::Output;
-        virtual void assign(addr_t const, value_t const) override;
-        virtual void print(string_t const &) override;
+	virtual void assign(addr_t const, value_t const) override;
+	virtual void print(string_t const &) override;
 };
 
 } /* namespace stream */
